@@ -431,8 +431,18 @@ def main():
 
             log("✅ 登录成功")
 
-            before = get_renewal_text(page)
-            log(f"📅 当前续期状态：{before}")
+            # ensure we are on the server detail page and it has rendered
+            if "/server/" not in page.url:
+                page.goto(SERVER_URL, wait_until="domcontentloaded", timeout=60000)
+
+            before = ""
+            for _i in range(25):
+                before = get_renewal_text(page)
+                if before:
+                    break
+                time.sleep(1)
+
+            log(f"📅 当前续期状态：{before or '(未出现，继续找按钮)'}")
 
             body = page.locator("body").inner_text()
             if re.search(r"Renew\s+Limit\s+Reached", body, re.I):
@@ -441,7 +451,12 @@ def main():
                     tg(f"⏳ Host-Ship 未到续期时间\n{before or '未知'}")
                 return 0
 
-            btn = find_renew_button(page)
+            btn = None
+            for _round in range(4):
+                btn = find_renew_button(page)
+                if btn:
+                    break
+                time.sleep(3)
             if not btn:
                 safe_screenshot(page, "hostship_no_renew_button.png", full_page=True)
                 tg(f"⚠️ Host-Ship 需要检查\n没有找到 Renew 按钮；{before or '未知'}")
