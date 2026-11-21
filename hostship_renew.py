@@ -281,23 +281,45 @@ def _turnstile_token(page):
         return False
 
 
-def solve_turnstile(page, max_rounds=10):
-    """Locate the Cloudflare Turnstile widget and click its
-    checkbox with real mouse events until a token is issued."""
-    iframe_loc = 'iframe[src*="challenges.cloudflare.com"]'
+def _turnstile_rect(page):
+    """The new Turnstile widget renders its iframe inside a closed
+    shadow root, so CSS selectors cannot see it. Locate the visible
+    widget box via the response input's ancestors instead."""
+    try:
+        return page.evaluate(
+            '() => {'
+            ' const input = document.querySelector('
+            '"input[name=\"cf-turnstile-response\"]");'
+            ' if (!input) return null;'
+            ' let el = input;'
+            ' for (let i = 0; i < 8 && el; i++) {'
+            '  el = el.parentElement;'
+            '  if (!el) break;'
+            '  const r = el.getBoundingClientRect();'
+            '  if (r.width > 150 && r.height > 40 && r.y > 0)'
+            '   return {x: r.x, y: r.y, w: r.width, h: r.height};'
+            ' }'
+            ' const r2 = input.getBoundingClientRect();'
+            ' return {x: r2.x, y: r2.y, w: 300, h: 65};'
+            '}'
+        )
+    except Exception:
+        return None
 
-    found = False
-    for _ in range(15):
+
+def solve_turnstile(page, max_rounds=12):
+    """Click the visible Turnstile checkbox with real mouse
+    events until a response token is issued."""
+    for _ in range(10):
         try:
-            if page.locator(iframe_loc).count() > 0:
-                found = True
+            if page.locator(TURNSTILE_INPUT).count() > 0:
                 break
         except Exception:
             pass
         time.sleep(1)
 
-    if not found:
-        log('i: no turnstile widget detected')
+    if page.locator(TURNSTILE_INPUT).count() == 0:
+        log('i: no turnstile input on page')
         return _turnstile_token(page)
 
     log('detected turnstile widget')
@@ -307,20 +329,25 @@ def solve_turnstile(page, max_rounds=10):
             log('turnstile already passed')
             return True
 
-        try:
-            box = page.locator(iframe_loc).first.bounding_box()
-            if box:
-                x = box['x'] + 30
-                y = box['y'] + box['height'] / 2
-                log(
-                    'click turnstile checkbox '
-                    f'({int(x)},{int(y)}) round {attempt + 1}'
-                )
-                page.mouse.click(x, y)
-        except Exception as e:
-            log(f'click exception: {e}')
+        rect = _turnstile_rect(page)
 
-        for _ in range(20):
+        if rect:
+            # checkbox sits near the left edge, vertically centered
+            x = rect['x'] + 28
+            y = rect['y'] + rect['h'] / 2
+            log(
+                f'click turnstile checkbox '
+                f'({int(x)},{int(y)}) round {attempt + 1} '
+                f'(box {int(rect["w"])}x{int(rect["h"])})'
+            )
+            try:
+                page.mouse.click(x, y)
+            except Exception as e:
+                log(f'click exception: {e}')
+        else:
+            log(f'round {attempt + 1}: widget rect not found')
+
+        for _ in range(24):
             time.sleep(0.5)
             if _turnstile_token(page):
                 log('turnstile token obtained')
