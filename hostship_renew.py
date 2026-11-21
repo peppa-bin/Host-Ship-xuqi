@@ -1,948 +1,476 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+"""Host-Ship 自动续期 v2 — 架构对齐 katabump 成功方案：
+真实品牌 Chrome/Edge 独立进程 + 远程调试端口 + CDP 附加 + CDP 鼠标点击过 Turnstile。
+"""
 import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+import json
+import shutil
+import socket
+
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import requests
 from playwright.sync_api import sync_playwright
 
+SERVER_URL = os.environ.get("SERVER_URL") or ""
+HOSTSHIP_LOGIN = os.environ.get("HOSTSHIP_LOGIN") or ""
+HOSTSHIP_PASSWORD = os.environ.get("HOSTSHIP_PASSWORD") or ""
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
+MANUAL_RUN = (os.environ.get("MANUAL_RUN") or "false").lower() == "true"
+IS_PROXY = (os.environ.get("IS_PROXY") or "false").lower() == "true"
+PROXY_SERVER = os.environ.get("PROXY_SERVER") or ""
 
-SERVER_URL = os.getenv("SERVER_URL", "").strip()
-HOSTSHIP_LOGIN = os.getenv("HOSTSHIP_LOGIN", "").strip()
-HOSTSHIP_PASSWORD = os.getenv("HOSTSHIP_PASSWORD", "").strip()
-
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "").strip()
-TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
-
-IS_PROXY = os.getenv("IS_PROXY", "false").lower() == "true"
-PROXY_SERVER = os.getenv(
-    "PROXY_SERVER",
-    "socks5://127.0.0.1:1080"
-).strip()
-
-MANUAL_RUN = os.getenv(
-    "MANUAL_RUN",
-    "false"
-).lower() == "true"
-
-BJ_TZ = ZoneInfo("Asia/Shanghai")
+DEBUG_PORT = 9222
+CHROME_PATH = os.environ.get("CHROME_PATH") or ""
 
 
 def log(msg):
-    print(
-        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}",
-        flush=True
-    )
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
 def server_id():
-    if not SERVER_URL:
-        return "未知"
-
-    return SERVER_URL.rstrip("/").split("/")[-1]
-
-
-def node_status():
-    if IS_PROXY:
-        return "✅ 已启用"
-
-    return "⚪ 未启用（直连）"
-
-
-def get_days(text):
-    if not text:
-        return None
-
-    match = re.search(
-        r"(\d+)\s*Days?",
-        text,
-        re.I
-    )
-
-    if match:
-        return int(match.group(1))
-
-    return None
-
-
-def beijing_now():
-    return datetime.now(BJ_TZ)
-
-
-def estimate_renew_date(status):
-    days = get_days(status)
-
-    if days is None:
-        return None
-
-    return (
-        beijing_now().date()
-        + timedelta(days=days)
-    )
+    m = re.search(r"/server/([a-z0-9]+)", SERVER_URL or "")
+    return m.group(1) if m else ""
 
 
 def tg(text):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        log("⚠️ Telegram 未配置，跳过通知")
-        return False
-
+        log("ℹ️ TG 未配置，跳过通知")
+        return
     try:
-        proxies = None
-
-        if IS_PROXY:
-            proxies = {
-                "http": PROXY_SERVER,
-                "https": PROXY_SERVER,
-            }
-
-        response = requests.post(
-            (
-                "https://api.telegram.org/"
-                f"bot{TG_BOT_TOKEN}/sendMessage"
-            ),
-            json={
-                "chat_id": TG_CHAT_ID,
-                "text": text,
-            },
-            timeout=20,
-            proxies=proxies,
+        requests.post(
+            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TG_CHAT_ID, "text": text},
+            timeout=10,
         )
-
-        if response.ok:
-            log("✅ Telegram 通知发送成功")
-            return True
-
-        log(
-            "❌ Telegram 通知失败: "
-            + response.text
-        )
-
-        return False
-
-    except Exception as exc:
-        log(
-            f"❌ Telegram 通知异常: {exc}"
-        )
-        return False
+        log("✅ Telegram 通知发送成功")
+    except Exception as e:
+        log(f"⚠️ Telegram 通知发送异常: {e}")
 
 
 def current_ip():
-    try:
-        proxies = None
-
-        if IS_PROXY:
-            proxies = {
-                "http": PROXY_SERVER,
-                "https": PROXY_SERVER,
-            }
-
-        response = requests.get(
-            "https://api.ipify.org",
-            timeout=15,
-            proxies=proxies,
-        )
-
-        if response.ok:
-            return response.text.strip()
-
-        return "获取失败"
-
-    except Exception:
-        return "获取失败"
-
-
-def build_check_message(status, ip):
-    days = get_days(status)
-    renew_date = estimate_renew_date(status)
-    now = beijing_now()
-
-    lines = [
-        "⏳ Host-Ship 检查完成",
-        "",
-        f"🖥️ 服务器：#{server_id()}",
-        f"🌐 节点状态：{node_status()}",
-        f"📍 出口IP：{ip}",
-        f"🕗 检查时间：{now.strftime('%Y/%m/%d %H:%M')}",
-        "",
-        "🔒 当前状态：未到续期时间",
-    ]
-
-    if days is not None:
-        lines.append(
-            f"⏱️ 距离续期：约 {days} 天"
-        )
-
-    if renew_date is not None:
-        lines.append(
-            "📆 预计可续期："
-            + renew_date.strftime("%Y/%m/%d")
-        )
-
-    if days is None:
-        lines.append(
-            f"📅 面板状态：{status}"
-        )
-
-    lines.append(
-        "⏰ 自动检查：每天 08:00（北京时间）"
-    )
-
-    return "\n".join(lines)
-
-
-def build_success_message(before, after, ip):
-    before_days = get_days(before)
-    after_days = get_days(after)
-    now = beijing_now()
-
-    lines = [
-        "🎉 Host-Ship 续期成功",
-        "",
-        f"🖥️ 服务器：#{server_id()}",
-        f"🌐 节点状态：{node_status()}",
-        f"📍 出口IP：{ip}",
-        f"🕗 续期时间：{now.strftime('%Y/%m/%d %H:%M')}",
-        "",
-    ]
-
-    if before_days is not None:
-        lines.append(
-            f"📅 续期前：约 {before_days} 天"
-        )
-    else:
-        lines.append(
-            f"📅 续期前：{before}"
-        )
-
-    if after_days is not None:
-        lines.append(
-            f"✅ 续期后：约 {after_days} 天"
-        )
-    else:
-        lines.append(
-            f"✅ 续期后：{after}"
-        )
-
-    lines.append(
-        "⏰ 自动检查：每天 08:00（北京时间）"
-    )
-
-    return "\n".join(lines)
-
-
-def build_error_message(title, reason, ip):
-    now = beijing_now()
-
-    return (
-        f"{title}\n\n"
-        f"🖥️ 服务器：#{server_id()}\n"
-        f"🌐 节点状态：{node_status()}\n"
-        f"📍 出口IP：{ip}\n"
-        f"🕗 检查时间：{now.strftime('%Y/%m/%d %H:%M')}\n\n"
-        f"⚠️ 原因：{reason}"
-    )
-
-
-def first_visible(page, selectors):
-    for selector in selectors:
-        locator = page.locator(
-            selector
-        ).first
-
+    for url in ("https://api.ipify.org", "https://ipv4.icanhazip.com"):
         try:
-            if (
-                locator.count()
-                and locator.is_visible()
-            ):
-                return locator
-
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                return r.text.strip()
         except Exception:
-            pass
-
-    return None
-
-
-TURNSTILE_INPUT = 'input[name="cf-turnstile-response"]'
+            continue
+    return "unknown"
 
 
-def _turnstile_token(page):
+def find_browser_binary():
+    """Locate a real branded chromium browser (Chrome or Edge)."""
+    if CHROME_PATH and os.path.exists(CHROME_PATH):
+        return CHROME_PATH
+    candidates = [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/opt/google/chrome/chrome",
+        "C:/Program Files/Google/Chrome/Application/chrome.exe",
+        "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+        os.path.expandvars(
+            "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
+        ),
+        os.path.expandvars(
+            "C:/Program Files/Microsoft/Edge/Application/msedge.exe"
+        ),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    which = shutil.which("google-chrome") or shutil.which("msedge")
+    return which
+
+
+def port_open(port):
+    s = socket.socket()
+    s.settimeout(1)
     try:
-        return page.evaluate(
-            '() => { const i = document.querySelector('
-            '"input[name=\"cf-turnstile-response\"]");'
-            ' return !!(i && i.value && i.value.length > 20); }'
-        )
+        s.connect(("127.0.0.1", port))
+        return True
     except Exception:
         return False
+    finally:
+        s.close()
 
 
-def _turnstile_rect(page):
-    """The new Turnstile widget renders its iframe inside a closed
-    shadow root, so CSS selectors cannot see it. Locate the visible
-    widget box via the response input's ancestors instead."""
-    try:
-        return page.evaluate(
-            '() => {'
-            ' const input = document.querySelector('
-            '"input[name=\"cf-turnstile-response\"]");'
-            ' if (!input) return null;'
-            ' let el = input;'
-            ' for (let i = 0; i < 8 && el; i++) {'
-            '  el = el.parentElement;'
-            '  if (!el) break;'
-            '  const r = el.getBoundingClientRect();'
-            '  if (r.width > 150 && r.height > 40 && r.y > 0)'
-            '   return {x: r.x, y: r.y, w: r.width, h: r.height};'
-            ' }'
-            ' const r2 = input.getBoundingClientRect();'
-            ' return {x: r2.x, y: r2.y, w: 300, h: 65};'
-            '}'
-        )
-    except Exception:
-        return None
+browser_proc = [None]
+
+
+def launch_browser():
+    binary = find_browser_binary()
+    if not binary:
+        raise RuntimeError("未找到 Chrome/Edge 浏览器二进制")
+
+    if port_open(DEBUG_PORT):
+        log(f"端口 {DEBUG_PORT} 已有浏览器在运行，跳过启动")
+        return
+
+    args = [
+        binary,
+        f"--remote-debugging-port={DEBUG_PORT}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-gpu",
+        "--window-size=1440,1000",
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--user-data-dir=/tmp/hostship-chrome-profile",
+    ]
+    if IS_PROXY and PROXY_SERVER:
+        args.append(f"--proxy-server={PROXY_SERVER}")
+
+    log(f"🚀 启动真实浏览器: {binary}")
+    import subprocess
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    browser_proc[0] = proc
+    time.sleep(5)
 
 
 def solve_turnstile(page, max_rounds=12):
-    """Click the visible Turnstile checkbox with real mouse
-    events until a response token is issued."""
+    """Click the visible Turnstile checkbox via CDP raw mouse events
+    (trusted events) until a response token is issued."""
     for _ in range(10):
         try:
-            if page.locator(TURNSTILE_INPUT).count() > 0:
+            if page.locator('input[name="cf-turnstile-response"]').count() > 0:
                 break
         except Exception:
             pass
         time.sleep(1)
 
-    if page.locator(TURNSTILE_INPUT).count() == 0:
-        log('i: no turnstile input on page')
-        return _turnstile_token(page)
+    log("🔐 检测到 Turnstile widget")
+    client = page.context.new_cdp_session(page)
 
-    log('detected turnstile widget')
+    def cdp_click(x, y):
+        client.send("Input.dispatchMouseEvent", {
+            "type": "mousePressed", "x": x, "y": y,
+            "button": "left", "clickCount": 1,
+        })
+        time.sleep(0.05 + (int(time.time() * 1000) % 100) / 1000.0)
+        client.send("Input.dispatchMouseEvent", {
+            "type": "mouseReleased", "x": x, "y": y,
+            "button": "left", "clickCount": 1,
+        })
+
+    def token():
+        try:
+            return page.evaluate(
+                "() => { const i = document.querySelector("
+                "'input[name=\"cf-turnstile-response\"]');"
+                " return !!(i && i.value && i.value.length > 20); }"
+            )
+        except Exception:
+            return False
+
+    def rect():
+        try:
+            return page.evaluate(
+                "() => {"
+                " const input = document.querySelector('input[name=\"cf-turnstile-response\"]');"
+                " if (!input) return null;"
+                " const r0 = input.getBoundingClientRect();"
+                " let el = input;"
+                " for (let i = 0; i < 8 && el; i++) {"
+                "  el = el.parentElement;"
+                "  if (!el) break;"
+                "  const r = el.getBoundingClientRect();"
+                "  if (r.width > 150 && r.height > 40 && r.y > 0)"
+                "   return {x: r.x, y: r.y, w: r.width, h: r.height};"
+                " }"
+                " return {x: r0.x, y: r0.y, w: 300, h: 65};"
+                "}"
+            )
+        except Exception:
+            return None
 
     for attempt in range(max_rounds):
-        if _turnstile_token(page):
-            log('turnstile already passed')
+        if token():
+            log("✅ Turnstile 已通过")
+            client.detach()
             return True
 
-        rect = _turnstile_rect(page)
+        r = rect()
+        if not r:
+            log(f"round {attempt + 1}: widget rect not found")
+            time.sleep(12)
+            continue
 
-        if rect:
-            # checkbox sits near the left edge, vertically centered
-            x = rect['x'] + 28
-            y = rect['y'] + rect['h'] / 2
-            log(
-                f'click turnstile checkbox '
-                f'({int(x)},{int(y)}) round {attempt + 1} '
-                f'(box {int(rect["w"])}x{int(rect["h"])})'
-            )
-            try:
-                page.mouse.click(x, y)
-            except Exception as e:
-                log(f'click exception: {e}')
-        else:
-            log(f'round {attempt + 1}: widget rect not found')
+        x = r["x"] + 28
+        y = r["y"] + r["h"] / 2
+        log(f"🖱️ CDP 点击复选框 ({int(x)},{int(y)}) 第 {attempt + 1} 次")
+        try:
+            cdp_click(x, y)
+        except Exception as e:
+            log(f"⚠️ CDP click 异常: {e}")
 
-        for _ in range(24):
-            time.sleep(0.5)
-            if _turnstile_token(page):
-                log('turnstile token obtained')
+        for i in range(40):
+            time.sleep(1)
+            if token():
+                log(f"✅ Turnstile token 获取成功 ({i + 1}s)")
+                try:
+                    client.detach()
+                except Exception:
+                    pass
                 return True
 
-    return _turnstile_token(page)
+    try:
+        client.detach()
+    except Exception:
+        pass
+    return False
+
+
+
+def safe_screenshot(page, path, full_page=True):
+    try:
+        page.screenshot(path=path, full_page=full_page, timeout=15000)
+    except Exception as e:
+        log(f'⚠️ 截图失败({path}): {e}')
+
+def _read_alert(page):
+    try:
+        el = page.locator("div.alert").first
+        el.wait_for(timeout=4000)
+        return (el.inner_text() or "").strip()
+    except Exception:
+        return ""
 
 
 def login_if_needed(page):
-    page.goto(
-        SERVER_URL,
-        wait_until="domcontentloaded",
-        timeout=60000,
-    )
+    log(f"🌐 打开 {SERVER_URL}")
+    page.goto(SERVER_URL, wait_until="domcontentloaded", timeout=60000)
+    time.sleep(3)
 
-    time.sleep(2)
-
-    body = page.locator(
-        "body"
-    ).inner_text().lower()
-
-    if (
-        "/server/" in page.url
-        and "password" not in body
-    ):
+    body = (page.locator("body").inner_text() or "").lower()
+    if "/server/" in page.url and "password" not in body:
         return True
 
-    # Cloudflare interstitial may appear before the login form
-    solve_turnstile(page, max_rounds=5)
+    # solve interstitial turnstile if present
+    solve_turnstile(page, max_rounds=6)
 
+    log("等待登录表单...")
     try:
         page.wait_for_selector(
-            'input[type="email"], input[name="email"]',
-            timeout=45000,
+            'input[type="email"], input[name="email"]', timeout=45000
         )
     except Exception:
         pass
 
-    email = first_visible(
-        page,
-        [
-            'input[name="email"]',
-            'input[type="email"]',
-            'input[name="username"]',
-            'input[autocomplete="username"]',
-        ],
-    )
-
-    password = first_visible(
-        page,
-        [
-            'input[name="password"]',
-            'input[type="password"]',
-            'input[autocomplete="current-password"]',
-        ],
-    )
+    email = None
+    for sel in ('input[name="email"]', 'input[type="email"]'):
+        try:
+            el = page.locator(sel).first
+            el.wait_for(timeout=5000)
+            email = el
+            break
+        except Exception:
+            continue
+    password = None
+    for sel in ('input[name="password"]', 'input[type="password"]'):
+        try:
+            el = page.locator(sel).first
+            el.wait_for(timeout=5000)
+            password = el
+            break
+        except Exception:
+            continue
 
     if not email or not password:
-        log(
-            "❌ 没找到登录框，"
-            f"当前页面: {page.url}"
-        )
+        log(f"❌ 没找到登录框，当前页面: {page.url}")
+        safe_screenshot(page, "hostship_login_fail.png", full_page=True)
         return False
 
-    if (
-        not HOSTSHIP_LOGIN
-        or not HOSTSHIP_PASSWORD
-    ):
-        log(
-            "❌ 缺少 HOSTSHIP_LOGIN "
-            "/ HOSTSHIP_PASSWORD"
-        )
-        return False
-
-    log("🔐 正在登录 Host-Ship...")
-
+    log("📧 填写邮箱...")
     email.fill(HOSTSHIP_LOGIN)
+    time.sleep(1)
+    log("🔑 填写密码...")
     password.fill(HOSTSHIP_PASSWORD)
+    time.sleep(2)
 
     if not solve_turnstile(page, max_rounds=10):
         log("❌ Turnstile 未通过，无法登录")
+        safe_screenshot(page, "hostship_turnstile_fail.png", full_page=True)
         return False
 
+    log("🖱️ 点击提交按钮...")
     try:
         page.wait_for_selector(
-            'button[type="submit"]:not([disabled])',
-            timeout=20000,
+            'button[type="submit"]:not([disabled])', timeout=20000
         )
     except Exception:
-        log("⚠️ 提交按钮仍禁用，再试一轮 Turnstile")
-        solve_turnstile(page, max_rounds=5)
+        pass
+    try:
+        page.locator('button[type="submit"]').first.click(timeout=15000)
+    except Exception as e:
+        log(f"⚠️ 提交点击异常: {e}")
 
-    submit = first_visible(
-        page,
-        [
-            'button[type="submit"]',
-            'button:has-text("Login")',
-            'button:has-text("Sign in")',
-            'button:has-text("Log in")',
-        ],
-    )
+    log("⏳ 等待登录跳转...")
+    for _ in range(20):
+        time.sleep(1)
+        cur = page.url
+        if "/server/" in cur:
+            return True
 
-    if not submit:
-        log("❌ 没找到登录按钮")
-        return False
-
-    submit.click()
-
-    page.wait_for_timeout(3000)
-
-    text = page.locator(
-        "body"
-    ).inner_text().lower()
-
-    challenge_words = [
-        "captcha",
-        "verify you are human",
-        "security check",
-        "cloudflare",
-    ]
-
-    if any(
-        word in text
-        for word in challenge_words
-    ):
-        log("⚠️ 提交后仍检测到安全验证，重试登录流程")
-        return "retry"
-
-    page.goto(
-        SERVER_URL,
-        wait_until="domcontentloaded",
-        timeout=60000,
-    )
-
-    page.wait_for_timeout(2000)
-
-    return "/server/" in page.url
+    log(f"❌ 登录后未跳转到服务器页，当前: {page.url}")
+    safe_screenshot(page, "hostship_login_fail.png", full_page=True)
+    return False
 
 
 def get_renewal_text(page):
-    text = page.locator(
-        "body"
-    ).inner_text()
-
+    text = page.locator("body").inner_text()
     patterns = [
         r"Renewal\s+in\s+\d+\s+Days?",
         r"Renew\s+in\s+\d+\s+Days?",
         r"\d+\s+Days?\s+until\s+renewal",
     ]
-
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-            re.I,
-        )
-
-        if match:
-            return match.group(0)
-
-    if re.search(
-        r"Renew\s+Limit\s+Reached",
-        text,
-        re.I,
-    ):
-        return "Renew Limit Reached"
-
-    return "未识别"
+    for pat in patterns:
+        m = re.search(pat, text, re.I)
+        if m:
+            return m.group(0)
+    return ""
 
 
 def find_renew_button(page):
-    candidates = [
-        page.get_by_role(
-            "button",
-            name=re.compile(
-                r"^Renew(?:\s+Now|\s+Server)?$",
-                re.I,
-            ),
-        ),
-        page.get_by_role(
-            "link",
-            name=re.compile(
-                r"^Renew(?:\s+Now|\s+Server)?$",
-                re.I,
-            ),
-        ),
-        page.locator(
-            'button:has-text("Renew")'
-        ),
-        page.locator(
-            'a:has-text("Renew")'
-        ),
+    sels = [
+        'button:has-text("Renew")',
+        'a:has-text("Renew")',
+        'button:has-text("续期")',
     ]
-
-    for group in candidates:
+    for sel in sels:
         try:
-            count = group.count()
-
-            for i in range(count):
-                item = group.nth(i)
-
-                if item.is_visible():
-                    return item
-
+            btn = page.locator(sel).first
+            btn.wait_for(timeout=8000)
+            return btn
         except Exception:
-            pass
-
+            continue
     return None
 
 
-def confirm_renewal(page):
-    """Wait for the renewal dialog and click the real submit button."""
-    title = page.get_by_text(
-        re.compile(
-            r"Confirm\s+server\s+renewal",
-            re.I,
-        )
-    ).first
-
-    try:
-        title.wait_for(
-            state="visible",
-            timeout=8000,
-        )
-    except Exception:
-        log("❌ 点击 Renew 后未出现续期确认弹窗")
-        return False
-
-    confirm_buttons = [
-        page.get_by_role(
-            "dialog"
-        ).last.get_by_role(
-            "button",
-            name=re.compile(
-                r"^Renew\s+now$",
-                re.I,
-            ),
-        ),
-        page.get_by_role(
-            "button",
-            name=re.compile(
-                r"^Renew\s+now$",
-                re.I,
-            ),
-        ),
-        page.locator(
-            'button:has-text("Renew now")'
-        ),
-    ]
-
-    for group in confirm_buttons:
-        try:
-            count = group.count()
-
-            for i in range(count):
-                button = group.nth(i)
-
-                if (
-                    button.is_visible()
-                    and button.is_enabled()
-                ):
-                    log(
-                        "✅ 确认弹窗已打开，"
-                        "点击 Renew now..."
-                    )
-                    button.click()
-                    return True
-
-        except Exception:
-            pass
-
-    log("❌ 确认弹窗中未找到可点击的 Renew now")
-    return False
-
-
-def renewal_succeeded(before, after, body_text):
-    text = body_text.lower()
-    success_words = [
-        "renewed successfully",
-        "renewal successful",
-        "successfully renewed",
-        "renew limit reached",
-    ]
-
-    if any(word in text for word in success_words):
-        return True
-
-    before_days = get_days(before)
-    after_days = get_days(after)
-
-    return (
-        before_days is not None
-        and after_days is not None
-        and after_days > before_days
-    )
-
-
 def wait_for_renewal_result(page, before):
-    """Poll once, then reload to avoid reading a stale SPA state."""
-    after = get_renewal_text(page)
-
-    for attempt in range(5):
-        body_text = page.locator(
-            "body"
-        ).inner_text()
+    log("📋 等待续期结果...")
+    for i in range(20):
+        time.sleep(1)
+        text = (page.locator("body").inner_text() or "")
+        alert = _read_alert(page)
+        combined = (alert or "") + " " + text[:4000]
+        low = combined.lower()
         after = get_renewal_text(page)
-
-        if renewal_succeeded(
-            before,
-            after,
-            body_text,
-        ):
-            return True, after
-
-        page.wait_for_timeout(2000)
-
-        if attempt == 1:
-            page.reload(
-                wait_until="domcontentloaded",
-                timeout=60000,
-            )
-            page.wait_for_timeout(2000)
-
-    return False, after
+        if "renew limit reached" in low or "can't renew" in low:
+            return ("⏳ 未到续期时间", after or before, False)
+        if any(k in low for k in ("success", "renewed", "extended")):
+            return ("✅ 续期成功", after or before, True)
+    return ("ℹ️ 未检测到明确结果", before, False)
 
 
 def main():
-    if not SERVER_URL.startswith(
-        "https://panel.host-ship.com/server/"
-    ):
+    if not SERVER_URL.startswith("https://panel.host-ship.com/server/"):
         log("❌ SERVER_URL 不正确")
-
-        tg(
-            "❌ Host-Ship 配置错误\n"
-            "SERVER_URL 不是服务器详情页地址"
-        )
-
+        tg("❌ Host-Ship 配置错误\nSERVER_URL 不是服务器详情页地址")
         return 1
 
     log("======================================")
-    log(" Host-Ship Free Auto Renew")
+    log(" Host-Ship Free Auto Renew v2")
     log("======================================")
 
-    log(
-        f"🌐 节点状态：{node_status()}"
-    )
-
     ip = current_ip()
+    log(f"📍 当前出口IP：{ip}")
 
-    log(
-        f"📍 当前出口IP：{ip}"
-    )
+    exit_code = 1
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            proxy={
-                "server": PROXY_SERVER
-            }
-            if IS_PROXY
-            else None,
-            args=[
-                "--no-sandbox"
-            ],
-        )
-
-        context = browser.new_context(
-            viewport={
-                "width": 1440,
-                "height": 1000,
-            },
-            user_agent=(
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/128.0.0.0 Safari/537.36"
-            ),
-        )
-
-        page = context.new_page()
+        launch_browser()
+        browser = None
+        for k in range(5):
+            try:
+                browser = p.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{DEBUG_PORT}"
+                )
+                log("✅ CDP 连接成功")
+                break
+            except Exception as e:
+                log(f"CDP 连接尝试 {k + 1} 失败: {e}")
+                time.sleep(2)
+        if not browser:
+            tg("❌ Host-Ship 续期失败\n无法连接浏览器 CDP")
+            return 1
 
         try:
-            logged_in = False
+            context = browser.contexts[0]
+            page = context.pages[0] if context.pages else context.new_page()
 
+            logged_in = False
             for attempt in range(3):
                 result = login_if_needed(page)
-
                 if result is True:
                     logged_in = True
                     break
-
-                if result == "retry":
-                    log(
-                        f"🔁 第 {attempt + 1} 次登录遇到验证，重试..."
-                    )
-
-                    page.goto(
-                        SERVER_URL,
-                        wait_until="domcontentloaded",
-                        timeout=60000,
-                    )
-
-                    page.wait_for_timeout(3000)
-
-                    continue
-
-                break
+                if attempt < 2:
+                    log(f"🔁 登录第 {attempt + 1} 次失败，重试...")
+                    time.sleep(5)
 
             if not logged_in:
-                page.screenshot(
-                    path="hostship_login_fail.png",
-                    full_page=True,
-                )
-
-                tg(
-                    build_error_message(
-                        "❌ Host-Ship 登录失败",
-                        "登录失败或遇到安全验证",
-                        ip,
-                    )
-                )
-
+                tg("❌ Host-Ship 登录失败\n登录失败或遇到安全验证")
                 return 1
 
             log("✅ 登录成功")
 
             before = get_renewal_text(page)
+            log(f"📅 当前续期状态：{before}")
 
-            log(
-                f"📅 当前续期状态：{before}"
-            )
-
-            body = page.locator(
-                "body"
-            ).inner_text()
-
-            if re.search(
-                r"Renew\s+Limit\s+Reached",
-                body,
-                re.I,
-            ):
-                log(
-                    "⏳ 目前未到续期时间，"
-                    "不进行操作"
-                )
-
+            body = page.locator("body").inner_text()
+            if re.search(r"Renew\s+Limit\s+Reached", body, re.I):
+                log("⏳ 未到续期时间")
                 if MANUAL_RUN:
-                    tg(
-                        build_check_message(
-                            before,
-                            ip,
-                        )
-                    )
-
+                    tg(f"⏳ Host-Ship 未到续期时间\n{before or '未知'}")
                 return 0
 
-            button = find_renew_button(page)
-
-            if not button:
-                page.screenshot(
-                    path="hostship_no_renew_button.png",
-                    full_page=True,
-                )
-
-                tg(
-                    build_error_message(
-                        "⚠️ Host-Ship 需要检查",
-                        (
-                            "没有找到可用的 "
-                            f"Renew 按钮；{before}"
-                        ),
-                        ip,
-                    )
-                )
-
+            btn = find_renew_button(page)
+            if not btn:
+                safe_screenshot(page, "hostship_no_renew_button.png", full_page=True)
+                tg(f"⚠️ Host-Ship 需要检查\n没有找到 Renew 按钮；{before or '未知'}")
                 return 1
 
+            log("🖱️ 点击 Renew...")
+            btn.click()
+            time.sleep(3)
+
+            # confirm modal if present
             try:
-                disabled = button.is_disabled()
-
+                modal_btn = page.locator(
+                    'div.modal.show button, '
+                    'div[class*="modal"] button'
+                ).first
+                modal_btn.wait_for(timeout=8000)
+                modal_btn.click()
+                log("✅ 已确认续期模态框")
             except Exception:
-                disabled = False
+                log("ℹ️ 无模态框或直接执行")
 
-            if disabled:
-                log(
-                    "⏳ Renew 按钮当前不可点击"
-                )
+            time.sleep(5)
 
-                if MANUAL_RUN:
-                    tg(
-                        build_check_message(
-                            before,
-                            ip,
-                        )
-                    )
+            outcome, after, success = wait_for_renewal_result(page, before)
+            safe_screenshot(page, "hostship_result.png", full_page=True)
 
-                return 0
+            tg(f"{outcome}\n Host-Ship 续期\n📅 {before or '未知'} → {after or '未知'}")
 
-            log(
-                "🔄 已到续期窗口，"
-                "点击 Renew..."
-            )
-
-            button.click()
-
-            if not confirm_renewal(page):
-                page.screenshot(
-                    path="hostship_confirm_fail.png",
-                    full_page=True,
-                )
-
-                tg(
-                    build_error_message(
-                        "❌ Host-Ship 续期确认失败",
-                        (
-                            "点击第一层 Renew 后，"
-                            "未能点击确认弹窗中的 Renew now"
-                        ),
-                        ip,
-                    )
-                )
-
-                return 1
-
-            success, after = wait_for_renewal_result(
-                page,
-                before,
-            )
-
-            if success:
-                log(
-                    "✅ 续期成功："
-                    f"{before} -> {after}"
-                )
-
-                tg(
-                    build_success_message(
-                        before,
-                        after,
-                        ip,
-                    )
-                )
-
-                return 0
-
-            page.screenshot(
-                path="hostship_renew_uncertain.png",
-                full_page=True,
-            )
-
-            log(
-                "⚠️ 已点击续期，"
-                "但无法确认结果"
-            )
-
-            tg(
-                build_error_message(
-                    "⚠️ Host-Ship 续期结果需要检查",
-                    (
-                        f"续期前：{before}；"
-                        f"续期后：{after}"
-                    ),
-                    ip,
-                )
-            )
-
-            return 1
-
-        except Exception as exc:
-            log(
-                f"❌ 运行异常：{exc}"
-            )
-
-            try:
-                page.screenshot(
-                    path="hostship_error.png",
-                    full_page=True,
-                )
-            except Exception:
-                pass
-
-            tg(
-                build_error_message(
-                    "❌ Host-Ship 自动续期异常",
-                    str(exc),
-                    ip,
-                )
-            )
-
-            return 1
+            exit_code = 0 if success else 1
 
         finally:
-            browser.close()
+            pass
+
+    return exit_code
 
 
 if __name__ == "__main__":
+    import sys
     sys.exit(main())
