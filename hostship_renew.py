@@ -90,13 +90,21 @@ def get_renewal_state(s, sid):
         timeout=30,
     )
     if r.status_code != 200:
-        head = (r.text or "")[:300].replace("\n", " ")
+        body_all = (r.text or "")[:2500]
+        title = ""
+        m = re.search(r"<title>(.*?)</title>", body_all, re.S)
+        if m:
+            title = m.group(1)[:100]
         cf = r.headers.get("cf-mitigated", "")
+        ray = r.headers.get("cf-ray", "")
         srv = r.headers.get("server", "")
-        raise RuntimeError(
-            f"GET server API -> HTTP {r.status_code} | "
-            f"cf-mitigated={cf} | server={srv} | body={head}"
+        cache = r.headers.get("cf-cache-status", "")
+        log(
+            f"❌ GET 失败诊断: url={r.url} | title={title} | "
+            f"cf-ray={ray} | cf-cache={cache} | cf-mitigated={cf} | server={srv}"
         )
+        log(f"❌ body: {body_all[:1200]}")
+        raise RuntimeError(f"GET server API -> HTTP {r.status_code}")
     a = r.json()["attributes"]
     return {
         "expires": a.get("renewal_expires_at") or "未知",
