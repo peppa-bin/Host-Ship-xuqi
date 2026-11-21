@@ -13,7 +13,7 @@ permissions:
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -27,12 +27,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright requests "requests[socks]"
-          python -m playwright install --with-deps chromium
-          sudo apt-get install -y xvfb fonts-noto-cjk x11-utils
-          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo dpkg -i /tmp/chrome.deb || sudo apt-get -f install -y
-          google-chrome --version
+          pip install requests
 
       - name: Setup optional VLESS/VMess/Trojan node
         env:
@@ -46,26 +41,13 @@ jobs:
             echo "No NODE_LINK, direct connection will be used."
           fi
 
-      - name: Run renew (real chrome under xvfb)
+      - name: Run renew (HTTP)
         env:
           SERVER_URL: ${{ secrets.SERVER_URL }}
-          HOSTSHIP_LOGIN: ${{ secrets.HOSTSHIP_LOGIN }}
-          HOSTSHIP_PASSWORD: ${{ secrets.HOSTSHIP_PASSWORD }}
+          HOSTSHIP_COOKIES: ${{ secrets.HOSTSHIP_COOKIES }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}
           IS_PROXY: ${{ env.IS_PROXY }}
           PROXY_SERVER: ${{ env.PROXY_SERVER }}
-          CHROME_PATH: /usr/bin/google-chrome
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1440x1000x24" \
-            python hostship_renew.py
-
-      - name: Upload screenshots on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hostship-debug-screenshots
-          path: |
-            hostship_*.png
-          if-no-files-found: ignore
+        run: python hostship_renew.py
