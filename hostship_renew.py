@@ -305,14 +305,21 @@ def login_if_needed(page):
     log("🖱️ 点击提交按钮...")
     try:
         page.wait_for_selector(
-            'button[type="submit"]:not([disabled])', timeout=20000
+            'button[type="submit"]:not([disabled]), '
+            'button:has-text("Sign In"):not([disabled])', timeout=20000
         )
     except Exception:
         pass
-    try:
-        page.locator('button[type="submit"]').first.click(timeout=15000)
-    except Exception as e:
-        log(f"⚠️ 提交点击异常: {e}")
+    clicked = False
+    for sel in ('button[type="submit"]', 'button:has-text("Sign In")', 'button:has-text("Login")'):
+        try:
+            page.locator(sel).first.click(timeout=8000)
+            clicked = True
+            break
+        except Exception:
+            continue
+    if not clicked:
+        log('⚠️ 提交按钮点击失败')
 
     log("⏳ 等待登录跳转...")
     for _ in range(20):
