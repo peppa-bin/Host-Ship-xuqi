@@ -267,6 +267,68 @@ def first_visible(page, selectors):
     return None
 
 
+TURNSTILE_INPUT = 'input[name="cf-turnstile-response"]'
+
+
+def _turnstile_token(page):
+    try:
+        return page.evaluate(
+            '() => { const i = document.querySelector('
+            '"input[name=\"cf-turnstile-response\"]");'
+            ' return !!(i && i.value && i.value.length > 20); }'
+        )
+    except Exception:
+        return False
+
+
+def solve_turnstile(page, max_rounds=10):
+    """Locate the Cloudflare Turnstile widget and click its
+    checkbox with real mouse events until a token is issued."""
+    iframe_loc = 'iframe[src*="challenges.cloudflare.com"]'
+
+    found = False
+    for _ in range(15):
+        try:
+            if page.locator(iframe_loc).count() > 0:
+                found = True
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+
+    if not found:
+        log('i: no turnstile widget detected')
+        return _turnstile_token(page)
+
+    log('detected turnstile widget')
+
+    for attempt in range(max_rounds):
+        if _turnstile_token(page):
+            log('turnstile already passed')
+            return True
+
+        try:
+            box = page.locator(iframe_loc).first.bounding_box()
+            if box:
+                x = box['x'] + 30
+                y = box['y'] + box['height'] / 2
+                log(
+                    'click turnstile checkbox '
+                    f'({int(x)},{int(y)}) round {attempt + 1}'
+                )
+                page.mouse.click(x, y)
+        except Exception as e:
+            log(f'click exception: {e}')
+
+        for _ in range(20):
+            time.sleep(0.5)
+            if _turnstile_token(page):
+                log('turnstile token obtained')
+                return True
+
+    return _turnstile_token(page)
+
+
 def login_if_needed(page):
     page.goto(
         SERVER_URL,
@@ -285,6 +347,17 @@ def login_if_needed(page):
         and "password" not in body
     ):
         return True
+
+    # Cloudflare interstitial may appear before the login form
+    solve_turnstile(page, max_rounds=5)
+
+    try:
+        page.wait_for_selector(
+            'input[type="email"], input[name="email"]',
+            timeout=45000,
+        )
+    except Exception:
+        pass
 
     email = first_visible(
         page,
@@ -327,6 +400,19 @@ def login_if_needed(page):
     email.fill(HOSTSHIP_LOGIN)
     password.fill(HOSTSHIP_PASSWORD)
 
+    if not solve_turnstile(page, max_rounds=10):
+        log("❌ Turnstile 未通过，无法登录")
+        return False
+
+    try:
+        page.wait_for_selector(
+            'button[type="submit"]:not([disabled])',
+            timeout=20000,
+        )
+    except Exception:
+        log("⚠️ 提交按钮仍禁用，再试一轮 Turnstile")
+        solve_turnstile(page, max_rounds=5)
+
     submit = first_visible(
         page,
         [
@@ -360,11 +446,8 @@ def login_if_needed(page):
         word in text
         for word in challenge_words
     ):
-        log(
-            "⚠️ 检测到验证码/"
-            "安全验证，需要手动处理"
-        )
-        return False
+        log("⚠️ 提交后仍检测到安全验证，重试登录流程")
+        return "retry"
 
     page.goto(
         SERVER_URL,
@@ -593,7 +676,7 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=True,
+            headless=False,
             proxy={
                 "server": PROXY_SERVER
             }
@@ -621,7 +704,33 @@ def main():
         page = context.new_page()
 
         try:
-            if not login_if_needed(page):
+            logged_in = False
+
+            for attempt in range(3):
+                result = login_if_needed(page)
+
+                if result is True:
+                    logged_in = True
+                    break
+
+                if result == "retry":
+                    log(
+                        f"🔁 第 {attempt + 1} 次登录遇到验证，重试..."
+                    )
+
+                    page.goto(
+                        SERVER_URL,
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+
+                    page.wait_for_timeout(3000)
+
+                    continue
+
+                break
+
+            if not logged_in:
                 page.screenshot(
                     path="hostship_login_fail.png",
                     full_page=True,
