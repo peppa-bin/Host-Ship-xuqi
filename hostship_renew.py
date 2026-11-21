@@ -90,7 +90,13 @@ def get_renewal_state(s, sid):
         timeout=30,
     )
     if r.status_code != 200:
-        raise RuntimeError(f"GET server API -> HTTP {r.status_code}")
+        head = (r.text or "")[:300].replace("\n", " ")
+        cf = r.headers.get("cf-mitigated", "")
+        srv = r.headers.get("server", "")
+        raise RuntimeError(
+            f"GET server API -> HTTP {r.status_code} | "
+            f"cf-mitigated={cf} | server={srv} | body={head}"
+        )
     a = r.json()["attributes"]
     return {
         "expires": a.get("renewal_expires_at") or "未知",
@@ -129,8 +135,8 @@ def main():
     try:
         state = get_renewal_state(s, sid)
     except RuntimeError as e:
-        log(f"❌ {e}（session 可能已过期，请更新 HOSTSHIP_COOKIES）")
-        tg("❌ Host-Ship 续期失败\nsession 过期或 CF 拦截，请更新 HOSTSHIP_COOKIES")
+        log(f"❌ {e}")
+        tg("❌ Host-Ship 续期失败\n" + str(e))
         return 1
 
     log(f"📅 续期前状态：{state}")
