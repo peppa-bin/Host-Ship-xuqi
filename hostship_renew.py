@@ -261,13 +261,13 @@ def login_if_needed(page):
     log("等待登录表单...")
     try:
         page.wait_for_selector(
-            'input[type="email"], input[name="email"]', timeout=45000
+            'input[type="email"], input[name="email"], input[name="username"], input[autocomplete="username"], input[type="text"]', timeout=45000
         )
     except Exception:
         pass
 
     email = None
-    for sel in ('input[name="email"]', 'input[type="email"]'):
+    for sel in ('input[name="email"]', 'input[type="email"]', 'input[name="username"]', 'input[autocomplete="username"]', 'input[type="text"]'):
         try:
             el = page.locator(sel).first
             el.wait_for(timeout=5000)
