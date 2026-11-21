@@ -5,7 +5,6 @@ on:
 
   schedule:
     # 每天北京时间 08:00 自动检查
-    # UTC 00:00 = 北京时间 08:00
     - cron: "0 0 * * *"
 
 permissions:
@@ -31,6 +30,9 @@ jobs:
           pip install playwright requests "requests[socks]"
           python -m playwright install --with-deps chromium
           sudo apt-get install -y xvfb fonts-noto-cjk x11-utils
+          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i /tmp/chrome.deb || sudo apt-get -f install -y
+          google-chrome --version
 
       - name: Setup optional VLESS/VMess/Trojan node
         env:
@@ -38,28 +40,23 @@ jobs:
         run: |
           if [ -n "$NODE_LINK" ]; then
             echo "NODE_LINK detected, setting up local proxy..."
-
             bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
-
           else
             echo "IS_PROXY=false" >> "$GITHUB_ENV"
             echo "No NODE_LINK, direct connection will be used."
           fi
 
-      - name: Run renew (headed chromium under xvfb)
+      - name: Run renew (real chrome under xvfb)
         env:
           SERVER_URL: ${{ secrets.SERVER_URL }}
           HOSTSHIP_LOGIN: ${{ secrets.HOSTSHIP_LOGIN }}
           HOSTSHIP_PASSWORD: ${{ secrets.HOSTSHIP_PASSWORD }}
-
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-
           MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}
-
           IS_PROXY: ${{ env.IS_PROXY }}
           PROXY_SERVER: ${{ env.PROXY_SERVER }}
-
+          CHROME_PATH: /usr/bin/google-chrome
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1440x1000x24" \
             python hostship_renew.py
@@ -72,9 +69,3 @@ jobs:
           path: |
             hostship_*.png
           if-no-files-found: ignore
-
-      - name: Cleanup proxy
-        if: always()
-        run: |
-          pkill -f sing-box || true
-          rm -f sing-box sing-box-config.json sing-box.log || true
